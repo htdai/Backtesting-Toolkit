@@ -4,36 +4,35 @@ import numpy as np
 
 
 class Single_Asset:
-    def __init__(self, ann: int, rf: float, input_path: str, input_file: str, output_path: str):
+    def __init__(self, ann: int, rf: float, data=None):
         """
         Initialize a backtester for one single asset
         Think of it as sth that takes in a NAV series and spits out several stats
         Can't further impose positions on the NAV series
         :param int ann: number of days used to annualize statistics, e.g. 250 or 252
         :param float rf: risk-free rate
-        :param str input_path: path of the folder where NAV (or closing) spreadsheet is stored
-        :param str input_file: file name of the NAV (or closing) spreadsheet
-        :param str output_path: path of the output folder
         """
         self.ann = ann
         self.rf = rf
+        self.input_path = self.output_path = None
+        self.data = data
+        self.backtest_results = dict()
+
+    def load_sheet_from_file(self, input_path: str, sheet_name='Sheet1'):
+        """
+        Load NAV series data from a local Excel file
+        :param str input_path: file path of the Excel file
+        :param str sheet_name: name of the sheet containing NAV series, 'Sheet1' by default
+        """
         self.input_path = input_path
-        self.input_file = input_file
-        self.output_path = output_path
-        self.data = None
+        self.data = pd.read_excel(self.input_path, sheet_name=sheet_name, index_col=0)
 
-    def read_sheet(self, sheet_name: str):
-        """
-        Read the Excel file
-        :param str sheet_name: sheet name of NAV series
-        """
-        self.data = pd.read_excel(self.input_path+self.input_file, sheet_name=sheet_name, index_col=0)
-
-    def backtest_whole_period(self, nav_series: pd.Series):
+    def backtest_series(self, nav_series: pd.Series, annualize: bool):
         """
         Backtest the given NAV series, regardless of its length
         So that this method can be used to both backtest the entire period, as well as backtest by year as long as nav_series is properly sliced
         :param pd.Series nav_series: nav series used to calculate stats
+        :param bool annualize: whether return is annualized
         :return pd.DataFrame: a DataFrame of stats
         """
         ret_series = nav_series.pct_change()
@@ -41,8 +40,8 @@ class Single_Asset:
         # --------------------------------------------------------------------------------------------------------------
         # Calculate return and stdev
         holding_period_return = nav_series.iloc[-1] / nav_series.iloc[0] - 1
-        annualized_return = (holding_period_return + 1) ** (self.ann / (len(ret_series) - 1)) - 1
-        # should take ((len(ret_series) - 1) / self.ann)-th root of hpr, i.e. raise it to the (self.ann / (len(ret_series) - 1))-th power
+        annualized_return = (holding_period_return + 1) ** (self.ann / (len(ret_series) - 1)) - 1 if annualize is True else holding_period_return
+        # should take ((len(ret_series) - 1) / self.ann)-th root of HPR, i.e. raise it to the (self.ann / (len(ret_series) - 1))-th power
         # len(ret_series) needs to minus 1 because of the initial np.nan as a result of pct_change()
         annualized_stdev = np.nanstd(ret_series, ddof=1) * np.sqrt(self.ann)
 
@@ -55,9 +54,8 @@ class Single_Asset:
         # --------------------------------------------------------------------------------------------------------------
         # Store results to the dataframe
         df = pd.DataFrame(
-            {'标的总收益': [holding_period_return], '年化收益率': [annualized_return],
-             '年化波动率': [annualized_stdev], '夏普比率': [sharpe], '卡玛比率': [calmar],
-             '最大回撤': [mdd],
+            {'区间收益率': [holding_period_return], '年化收益率': [annualized_return],
+             '年化波动率': [annualized_stdev], '最大回撤': [mdd], '夏普比率': [sharpe], '卡玛比率': [calmar],
              '最大回撤起始时间': [mdd_start], '最大回撤形成时间': [mdd_formation], '最大回撤恢复时间': [np.nan]
              })
 
@@ -75,7 +73,7 @@ class Single_Asset:
 
         # --------------------------------------------------------------------------------------------------------------
         # Backtest the entire period
-        df_all = self.backtest_whole_period(nav_series)
+        df_all = self.backtest_series(nav_series, annualize=True)
         try:
             df_all['最大回撤恢复时间'] = nav_series.loc[(nav_series >= nav_series.loc[df_all['最大回撤起始时间']][0]) & (pd.to_datetime(nav_series.index) > pd.to_datetime(df_all['最大回撤起始时间'][0]))].index[0].date()
         except:
@@ -90,6 +88,7 @@ class Single_Asset:
         for idx, year in enumerate(years):
             nav_series_by_year = nav_series.loc[nav_series.index.year == year]
             if idx == 0:
+                # if the first year only involves one data point, it merely serves as the opening price of the next year's series
                 if len(nav_series_by_year) == 1:
                     continue
             else:
@@ -97,20 +96,19 @@ class Single_Asset:
                 last_year_close.index = [nav_series.loc[nav_series.index.year == years[idx - 1]].index[-1]]
                 last_year_close.name = nav_series_by_year.name
                 nav_series_by_year = last_year_close.append(nav_series_by_year)
-            df_by_year = self.backtest_whole_period(nav_series_by_year)
+            df_by_year = self.backtest_series(nav_series_by_year, annualize=False)
             try:
                 df_by_year['最大回撤恢复时间'] = nav_series.loc[
                     (nav_series >= nav_series.loc[df_by_year['最大回撤起始时间']][0]) & (pd.to_datetime(nav_series.index) > pd.to_datetime(df_by_year['最大回撤起始时间'][0]))].index[0].date()
             except:
                 df_by_year['最大回撤恢复时间'] = '尚未恢复'
             df_by_year.index = [year]
-            df_by_year['年化收益率'] = df_by_year['标的总收益']
             df_list.append(df_by_year)
 
         # --------------------------------------------------------------------------------------------------------------
         # Concatenate results to get one holistic DataFrame
         df = pd.concat(df_list)
-        self.output(df, asset_name)
+        self.backtest_results[asset_name] = df
 
     def mdd(self, nav_series):
         """
@@ -126,21 +124,27 @@ class Single_Asset:
         start = start.date()
         return -mdd, start, formation
 
-    def output(self, df, asset_name):
+    def output(self, output_path: str, asset_name_list: list):
         """
         Save results as an Excel file
-        :param pd.DataFrame df: result sheet for both the entire period and by year
-        :param str asset_name: name of the asset
+        :param str output_path: desired file path of the Excel file containing backtest results
+        :param list asset_name_list: list of names of assets whose backtest results are to be output
         """
-
-        writer = pd.ExcelWriter(self.output_path + '%s回测结果.xlsx' % asset_name,
-                                engine='xlsxwriter')
-        df.to_excel(writer, sheet_name='%s回测结果' % asset_name)
+        writer = pd.ExcelWriter(output_path, engine='xlsxwriter')
+        for asset in asset_name_list:
+            if asset not in self.backtest_results.keys():
+                print('invalid asset %s, either no data or hasn\'t been backtested.' % asset)
+            else:
+                self.backtest_results[asset].to_excel(writer, sheet_name=asset)
         writer.save()
 
 
 if __name__ == '__main__':
-    a = Single_Asset(ann=250, rf=0, input_path=r'E:/College/Gap/Huatai/Misc/20210308回测框架v5.0/数据/', input_file='data.xlsx',
-                     output_path=r'E:/College/Gap/Huatai/Misc/20210308回测框架v5.0/输出/')
+    a = Single_Asset(ann=250, rf=0)
+    a.load_sheet_from_file(r'E:\College\Gap\Huatai\Backtesting-Toolkit\数据\data.xlsx', sheet_name='数据')
+    a.backtest('沪深300')
+    a.backtest('中证500')
+    a.output(output_path=r'E:\College\Gap\Huatai\Backtesting-Toolkit\输出\回测结果.xlsx', asset_name_list=['沪深300', '中证500'])
+
 
 

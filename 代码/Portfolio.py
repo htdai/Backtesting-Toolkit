@@ -1,26 +1,33 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Fri Jan  8 14:32:12 2021
-
-@author: Muffler
-"""
 import pandas as pd
 import numpy as np
 from chinese_calendar import is_workday, is_holiday
 from datetime import timedelta
+from Single_Asset import Single_Asset
 import matplotlib.pyplot as plt
 import warnings
 
 warnings.filterwarnings('ignore')
 
+
 class Portfolio:
-    def __init__(self, ann, start, end, fee_rate, rf, input_path, file,
-                 output_path, asset_file, single):
+    def __init__(self, ann: int, start, end, fee_rate, rf: float, input_path, file,
+                 output_path, asset_file, single, data=None, weight=None):
+        """
+        Initialize a backtester for a portfolio
+        :param int ann: number of days used to annualize statistics, e.g. 250 or 252
+        :param float rf: risk-free rate
+        """
         self.ann = ann
+        self.rf = rf
         self.start = start
         self.end = end
         self.fee_rate = fee_rate
-        self.rf = rf
+
+        self.input_path = self.output_path = None
+        self.data = data
+        self.weight = weight
+
         self.input_path = input_path
         self.file = file
         self.output_path = output_path
@@ -28,6 +35,18 @@ class Portfolio:
         self.single = single
         
     #读取excel
+    def load_sheet_from_file(self, input_path: str, data_sheet_name: str, weight_sheet_name: str):
+        """
+        Load NAV series data from a local Excel file
+        :param str input_path: file path of the Excel file
+        :param str data_sheet_name: name of the sheet containing NAV series
+        :param str data_sheet_name: name of the sheet containing weight series
+        """
+        self.input_path = input_path
+        self.data = pd.read_excel(self.input_path, sheet_name=data_sheet_name, index_col=0)
+        self.weight = pd.read_excel(self.input_path, sheet_name=weight_sheet_name, index_col=0)
+
+
     def sheet_read(self):    
         data = pd.read_excel(self.input_path+self.file, sheet_name = '数据', 
                              index_col = 0)
@@ -61,20 +80,26 @@ class Portfolio:
     
     #交易日处理    
     def time_process(self, weight):
+        # --------------------------------------------------------------------------------------------------------------
+        # 根据对“交易日”的定义，将weight分成交易日和非交易日两部分
         #计算策略期中的交易日，返回为list
         l = []
         temp = self.start
         while True:
             if temp > self.end:
                 break
-            if is_workday(temp)==False or is_holiday(temp)==True \
+            if is_workday(temp) is False or is_holiday(temp) is True \
                                        or temp.weekday()>4:
                 l.append(temp)
             temp += timedelta(days=1)
+        # l是非交易日
                     
-        workday1 = weight[~weight.index.isin(l)]
+        workday1 = weight[~weight.index.isin(l)]# 交易日对应的权重df
         #调整非交易日的日期
-        otherday = weight[weight.index.isin(l)]
+        otherday = weight[weight.index.isin(l)]     # 剩下的权重df
+
+        # --------------------------------------------------------------------------------------------------------------
+        #
         o = []
         for i in otherday.index:
             while is_workday(i)==False or is_holiday(i)==True or i.weekday()>4:
