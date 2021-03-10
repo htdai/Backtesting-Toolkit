@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-from 代码.Portfolio import Portfolio
-from 代码.Single_Asset import Single
+from Codes.Portfolio import Portfolio
+from Codes.Single_Asset import Single
 import pandas as pd
 
 
@@ -22,9 +22,9 @@ def main():
     end = pd.datetime(2021,2,3)
     fee_rate = 0#0.0003
     rf = 0
-    input_path = r'./数据/'
+    input_path = r'Data/'
     file = r'data.xlsx'
-    output_path = r'./输出/'
+    output_path = r'Output/'
     asset_file = r'资产组合表现.xlsx'
     single_file = r'单一资产表现.xlsx'
     single = r'沪深300'
@@ -33,8 +33,8 @@ def main():
                    output_path, asset_file, single)
     pb.portfolio_backtest()
     
-    sb = Single(ann, single, rf, input_path, file, output_path, single_file)
-    sb.single_backtest()
+    #sb = Single(ann, single, rf, input_path, file, output_path, single_file)
+    #sb.single_backtest()
 
 
 if __name__ == "__main__":
