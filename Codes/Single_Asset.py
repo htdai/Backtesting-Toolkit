@@ -7,12 +7,12 @@ class Single_Asset:
     def __init__(self, ann: int, rf: float, data=None):
         """
         Initialize a backtester for one single asset
-        Think of it as sth that takes in a NAV series and spits out several stats
-        Can't further impose positions on the NAV series
+        Think of it as sth that takes in a closing price series and spits out several stats
+        Can't further impose positions on the closing price series
         :param int ann: number of days used to annualize statistics, e.g. 250 or 252
         :param float rf: risk-free rate
-        :param pd.DataFrame data: NAV series, so that you can also use this backtester after some other Python programs
-        without loading a local Excel file
+        :param pd.DataFrame data: closing price series, so that you can also use this backtester after some other
+        Python programs without loading from a local Excel file
         """
         self.ann = ann
         self.rf = rf
@@ -22,16 +22,16 @@ class Single_Asset:
 
     def load_sheet_from_file(self, input_path: str, sheet_name='Sheet1'):
         """
-        Load NAV series data from a local Excel file
+        Load closing price series data from a local Excel file
         :param str input_path: file path of the Excel file
-        :param str sheet_name: name of the sheet containing NAV series, 'Sheet1' by default
+        :param str sheet_name: name of the sheet containing closing price series, 'Sheet1' by default
         """
         self.input_path = input_path
         self.data = pd.read_excel(self.input_path, sheet_name=sheet_name, index_col=0)
 
     def slice(self, start_date=None, end_date=None):
         """
-        Slice the NAV series data based on desired start and end
+        Slice the closing price series data based on desired start and end
         :param str start_date: desired start date
         :param str end_date: desired end date
         """
@@ -39,9 +39,9 @@ class Single_Asset:
 
     def backtest_series(self, nav_series: pd.Series, annualize: bool):
         """
-        Backtest the given NAV series, regardless of its length
+        Backtest the given closing price series, regardless of its length
         So that this method can be used to both backtest the entire period, as well as backtest by year as long as nav_series is properly sliced
-        :param pd.Series nav_series: nav series used to calculate stats
+        :param pd.Series nav_series: closing price series used to calculate stats
         :param bool annualize: whether return is annualized
         :return pd.DataFrame: a DataFrame of stats
         """
@@ -122,8 +122,8 @@ class Single_Asset:
 
     def mdd(self, nav_series):
         """
-        Calculate maximum drawdown using the given NAV series
-        :param pd.Series nav_series: NAV series used to calculate mdd stats
+        Calculate maximum drawdown using the given price series
+        :param pd.Series nav_series: price series used to calculate mdd stats
         :return : stats
         """
         dd = nav_series.div(nav_series.cummax()).sub(1)

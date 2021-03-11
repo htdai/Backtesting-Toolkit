@@ -1,7 +1,6 @@
 import pandas as pd
-import numpy as np
-from chinese_calendar import is_workday, is_holiday
-from datetime import timedelta
+from scipy.optimize import newton
+from Single_Asset import Single_Asset
 import matplotlib.pyplot as plt
 import warnings
 
@@ -9,43 +8,68 @@ warnings.filterwarnings('ignore')
 
 
 class Portfolio:
-    def __init__(self, ann: int, rf: float, fee_rate: float, data=None, weight=None):
+    def __init__(self, ann: int, rf: float, data=None, weight=None):
         """
         Initialize a backtester for a portfolio
         :param int ann: number of days used to annualize statistics, e.g. 250 or 252
         :param float rf: risk-free rate
-        :param float fee_rate: fee rate
-        :param pd.DataFrame data: NAV series, so that you can also use this backtester after some other Python programs
+        :param pd.DataFrame data: closing price series, so that you can also use this backtester after some other Python programs
         without loading a local Excel file
         :param pd.DataFrame weight: asset weight series, so that you can also use this backtester after some other Python programs
         without loading a local Excel file
         """
         self.ann = ann
         self.rf = rf
-        self.fee_rate = fee_rate
 
         self.input_path = self.output_path = None
         self.data = data
         self.weight = weight
 
-    def load_sheet_from_file(self, input_path: str, data_sheet_name: str, weight_sheet_name: str):
+        self.high_risk_name_list = self.high_risk_fee_rate = self.low_risk_name_list = self.low_risk_fee_rate = None
+
+        self.portfolio_results = dict()
+
+    def load_sheets_from_file(self, input_path: str, data_sheet_name: str, weight_sheet_name: str):
         """
-        Load NAV series data from a local Excel file
+        Load closing price series data from a local Excel file
         :param str input_path: file path of the Excel file
-        :param str data_sheet_name: name of the sheet containing NAV series
+        :param str data_sheet_name: name of the sheet containing closing price series
         :param str data_sheet_name: name of the sheet containing weight series
         """
         self.input_path = input_path
         self.data = pd.read_excel(self.input_path, sheet_name=data_sheet_name, index_col=0)
+        self.data.sort_index(ascending=True, inplace=True)
         self.weight = pd.read_excel(self.input_path, sheet_name=weight_sheet_name, index_col=0)
+        self.weight.sort_index(ascending=True, inplace=True)
 
         self.data = self.data[self.weight.columns]
-        # that is, only keep columns in self.data that has weight information; hence if not loading NAV and weight
+        # only keep columns in self.data that has weight information; hence if not loading closing price and weight
         # series from an local Excel file, the user will need to do this explicitly before initializing a backtester
+        # now columns in self.data also aligns with those in self.weight
+
+    def load_fee_rates(self, high_risk_name_list=None, high_risk_fee_rate=None, low_risk_name_list=None, low_risk_fee_rate=None):
+        """
+        Specify high and low risk assets as well as applicable fee rates respectively
+        :param list high_risk_name_list: list of names of high risk assets
+        :param float high_risk_fee_rate: fee rate for high risk assets
+        :param list low_risk_name_list: list of names of low risk assets (excluding cash)
+        :param float low_risk_fee_rate: fee rate for low risk assets (excluding cash)
+        """
+
+        duplicate_assets = list(set(high_risk_name_list) & set(low_risk_name_list))
+        if len(duplicate_assets) > 0:
+            raise ValueError('assets found in both high and low risk asset name lists: %s.' % ', '.join(duplicate_assets))
+
+        unspecified_assets = list(set(self.weight.columns) - (set(high_risk_name_list) | set(low_risk_name_list)))
+        if len(unspecified_assets) > 0:
+            raise ValueError('risk level unspecified for assets: %s.' % ', '.join(unspecified_assets))
+
+        self.high_risk_name_list, self.high_risk_fee_rate = high_risk_name_list, high_risk_fee_rate
+        self.low_risk_name_list, self.low_risk_fee_rate = low_risk_name_list, low_risk_fee_rate
 
     def slice(self, start_date=None, end_date=None):
         """
-        Slice the NAV series data based on desired start and end, and process both NAV and weight dataframes
+        Slice the closing price series data based on desired start and end, and process both closing price and weight dataframes
         It actually does more than merely slicing, but the method is still named "slice" to mirror that in Single_Asset
         :param str start_date: desired start date
         :param str end_date: desired end date
@@ -62,12 +86,12 @@ class Portfolio:
 
         # --------------------------------------------------------------------------------------------------------------
         # Step 2: adjust the weight dataframe
-        # The essence is to impose some sort of weighting on those NAV series, hence we adjust the weight dataframe s.t.
-        # its index is a subset of that of the NAV dataframe
+        # Backtesting is essentially imposing some sort of weighting structure on those NAV series, hence we adjust
+        # the weight dataframe s.t. its index is a subset of that of the NAV dataframe
 
         date_adjusted_weight = pd.DataFrame(columns=self.weight.columns)
 
-        for idx, date in enumerate(self.weight.index):  # enumerate all dates in the weight dataframe
+        for date in self.weight.index:  # iterate all dates in the weight dataframe
 
             if date in self.data.index:    # if date exists in the NAV dataframe, it can be safely kept
                 date_adjusted_weight.loc[date] = self.weight.loc[date]
@@ -75,7 +99,7 @@ class Portfolio:
             else:   # if date does NOT exist in the NAV dataframe...
                 nearest_closing_date = self.data.index[:date][-1]
 
-                if nearest_closing_date in date_adjusted_weight.index:
+                if nearest_closing_date in self.weight.index:
                     # but weight information for the nearest closing date is already specified...
                     continue    # then we simply discard it
 
@@ -90,217 +114,139 @@ class Portfolio:
         # Step 3: final processing
         # Now that the weight dataframe's index is a subset of the NAV dataframe's index, we slice the NAV dataframe
         # again s.t. their indices agree on the initial start date, but not necessarily the end date because you can
-        # have your last rebalancing earlier than the conclusion of NAV series
+        # still backtest your portfolio for as long as NAV series allow after the last rebalancing
         date_adjusted_weight.sort_index(ascending=True, inplace=True)
         self.weight = date_adjusted_weight
         self.data = self.data.loc[self.weight.index[0]:]
-    
-    #生成日收益率、净值、years列
-    def data_clean(self, data, net):
 
-        networth = net
-        data['daily'] = networth.diff()/networth.shift(1)
-        data['net_worth'] = networth
-        #生成years列，便于后续使用groupby
-        years = data.index.year
-        years = pd.DataFrame(years)
-        years.index = data.index
-        data['years'] = data.index.year
-  
-        return data
-    
-    #交易日处理    
-    def time_process(self, weight):
+    def calculate_fee(self, sb: pd.Series, sa: pd.Series, f: pd.Series, pa: pd.Series) -> float:
+        """
+        Calculate fee incurred for a given rebalancing
+        :param pd.Series sb: shares right before rebalancing
+        :param pd.Series sa: shares right after rebalancing
+        :param pd.Series f: fee rate vector
+        :param pd.Series pa: closing prices right after rebalancing, i.e. the prices you use to rebalance
+        :return float: fee incurred for the given rebalancing
+        """
+        return sum(abs(sb - sa) * f * pa)
+
+    def generate_nav(self):
+        """
+        Generate NAV series of the portfolio based on closing prices and
+        """
         # --------------------------------------------------------------------------------------------------------------
-        # 根据对“交易日”的定义，将weight分成交易日和非交易日两部分
-        #计算策略期中的交易日，返回为list
-        l = []
-        temp = self.start
-        while True:
-            if temp > self.end:
-                break
-            if is_workday(temp) is False or is_holiday(temp) is True \
-                                       or temp.weekday()>4:
-                l.append(temp)
-            temp += timedelta(days=1)
-        # l是非交易日
-                    
-        workday1 = weight[~weight.index.isin(l)]# 交易日对应的权重df
-        #调整非交易日的日期
-        otherday = weight[weight.index.isin(l)]     # 剩下的权重df
+        # Step 1: generate a bunch of dataframes and series to store various results
+        data = self.data / self.data.iloc[0]
+        # normalize intial prices to 1 for the concern of floating point number precision
+        input_weight = self.weight
+
+        portfolio_stats = pd.DataFrame(index=data.index)
+        shares = pd.DataFrame(index=data.index, columns=data.columns)
+        actual_weight = pd.DataFrame(index=data.index, columns=data.columns)
+        turnover_ratio = pd.DataFrame(index=data.index, columns=data.columns)
+        fee = pd.Series(index=data.index)
+        fee_rate = pd.Series(index=data.columns)
+        nav = pd.Series(index=data.index)
 
         # --------------------------------------------------------------------------------------------------------------
-        #
-        o = []
-        for i in otherday.index:
-            while is_workday(i)==False or is_holiday(i)==True or i.weekday()>4:
-                i +=timedelta(days=1)
-                o.append(i)
-        o = pd.Series(o)
-        workday2 = o[~o.isin(l)]
-        workday = pd.concat([pd.Series(workday1.index), workday2])
-        workday = workday.sort_values(ascending=True).reset_index(drop = True)
-        for i in range(len(workday)):
-            if workday[i] < self.start and workday[i+1] > self.start:
-                workday[i] = self.start
-            elif workday[i]< self.start:
-                workday[i] = np.nan
-            elif workday[i] > self.end:
-                workday[i] = np.nan
-        
-        return workday
-        
-    
-    #计算日收益率    
-    def dailyR(self, data):    
-        daily = data.diff()/data.shift(1)
-        #对数收益率
-        #daily = np.log(data/data.shift(1))
-        return daily
-    
-    #计算策略总收益
-    def wholeR(self, data):
-        p = data['net_worth']
-        wr = (p.iloc[-1]-p.iloc[0])/p.iloc[0]
-        return wr
-    
-    #计算年化收益率
-    def annualR(self, data, gb, period):
-        """period = 'by year' or 'all period' """
-        if period == 'by year':
-            r_p = gb['net_worth'].apply(lambda x:(x.iloc[-1]-x.iloc[0])/x.iloc[0])
-        elif period == 'all period':
-            r = self.wholeR(data)
-            r_p = ((1+r)**(self.ann/data['daily'].count())-1)
-        return r_p
-    
-    #计算年化波动率
-    def annualV(self, data, gb, period):
-        """period = 'by year' or 'all period' """
-        if period == 'by year':
-            s = gb['daily'].apply(np.nanstd)
-            V = np.sqrt(self.ann)*s
-        elif period == 'all period':
-            s = np.nansum((data['daily'].diff())**2)
-            V = np.sqrt(self.ann*s/(data['daily'].count()-1))
-        return V
-    
-    #计算历史最大回撤，回撤发生时间和结束时间
-    def max_dd(self, returns):
-        #计算每天的累计收益
-        r = (returns+1).cumprod()
-        #r.cummax()计算出累计收益的最大值，再用每天的累计收益除以这个最大值，算出收益率
-        dd = r.div(r.cummax()).sub(1)
-        #取最小
-        mdd = dd.min()
-        end = dd.idxmin()
-        end = end.date()
-        start = r.loc[:end].idxmax()
-        start = start.date()
-        return -mdd, start, end
-    
-    #计算夏普比率
-    def sharpe(self, data, gb, period):
-        """period = 'by year' or 'all period' """
-        r_p = self.annualR(data, gb, period)
-        V = self.annualV(data, gb, period)
-        sharpe =(r_p - self.rf)/V
-        if period == 'by year':
-            sharpe = pd.DataFrame(sharpe, columns=['夏普比率'])
-        return sharpe
-    
-    #计算卡玛比率
-    def carmar(self, data, gb, period):
-        """period = 'by year' or 'all period' """
-        r_p = self.annualR(data, gb, period)
-        if period == 'by year':
-            mdd, start, end = zip(*gb['daily'].apply(self.max_dd))
-            carmar = r_p/mdd
-            carmar = pd.DataFrame(carmar)
-            carmar.rename(columns={'net_worth':'carmar比率'},inplace = True)
-        elif period == 'all period':
-            mdd, start, end = self.max_dd(data['daily'])
-            carmar = r_p/mdd
-        return carmar
-    
-    
-    #计算每个产品的换手率
-    def turnR(self, weight, period):
-        """period = 'by year' or 'all period' """
-        #修改列名
-        columns = []
-        for i in weight.columns:
-            columns.append(i+'换手率')
-        weight.columns = columns
-        
-        if period =='by year':        
-            weight = abs(weight.diff())
-            weight['years'] = weight.index.year
-            weight = weight.groupby('years').apply(sum)
-            weight.drop('years',axis = 1,inplace = True)
-        elif period == 'all period':
-            weight = abs(weight.diff())
-            weight = weight.sum()
-            weight = pd.DataFrame(weight)
-            weight = weight.T
-        return weight
-    
-    #计算交易费用
-    def trade_fee(self, volume):
-        fee = volume * self.fee_rate
-        return fee
-    
-    #计算组合净值    
-    def net_worth(self, data, weight, workday):
-        #构建标的净值dataframe
-        price = pd.DataFrame.copy(data, deep = True)
-        #向上填充，得到每日持仓权重
-        time = pd.DataFrame(data.index, columns = ['日期'], index = data.index)
-        w = pd.merge(time, weight, how='outer', left_on = '日期',
-                      right_index = True).drop(['日期'], axis = 1)
-        w = w.sort_index(ascending=True)
-        w = w.fillna(method = 'ffill')
-        w = w.dropna()
-        #price = price/price.iloc[0]
-               
-        #计算产品净值
-        data['net'] = np.nan
-        asset_share = pd.DataFrame(index = data.index,columns =weight.columns)
-        asset_weight = pd.DataFrame(index = data.index,columns =weight.columns)
+        # Step 2: fill in the fee rate vector, then define a function for root solving NAV after rebalancing
+        for asset in fee_rate.index:
+            if asset in self.high_risk_name_list:
+                fee_rate.loc[asset] = self.high_risk_fee_rate
+            elif asset in self.low_risk_name_list:
+                fee_rate.loc[asset] = self.low_risk_fee_rate
 
-        for j in range(len(data)):
-            #建仓的净值为1，所以份额等于cash
-            if j ==0:
-                data['net'][j] = 1.0
-                asset_share.iloc[j] = w.iloc[j]/price.iloc[j]
-                asset_weight.iloc[j] = w.iloc[j]
-                continue
-            elif data.index[j] in list(workday):
-                now_value = sum(asset_share.iloc[j-1]*price.iloc[j])
-                pre_position = asset_share.iloc[j-1]*price.iloc[j-1]
-                now_position = now_value * w.iloc[j]
-                trade_volume = now_position - pre_position
-                total_volume = sum(abs(trade_volume))
-                fee = self.trade_fee(total_volume)
-                data['net'][j] = now_value - fee
-                asset_share.iloc[j] = data['net'][j]*w.iloc[j]/price.iloc[j]
-                asset_weight.iloc[j] = w.iloc[j]
-            else:
-                asset_share.iloc[j] = asset_share.iloc[j-1]
-                data['net'][j] = sum(asset_share.iloc[j]*price.iloc[j])
-                asset_weight.iloc[j] = (asset_share.iloc[j]
-                                        *price.iloc[j]/data['net'][j])       
-        
-        net = data['net']
-        #计算每日组合内部权重(百分比)
-        columns = []
-        for i in asset_weight.columns:
-            columns.append(i+'每日权重')
-        asset_weight.columns = columns
-        asset_weight.index = asset_weight.index.date
-        asset_weight = asset_weight.applymap(lambda x: '%.2f%%' % (x*100))
-        return net, asset_weight, asset_share
+        def nav_equation(x: float, sb: pd.Series, wa: pd.Series, pa: pd.Series, f: pd.Series, navb: float):
+            """
+            Solve the NAV right after rebalancing using a fundamental relationship that the change in NAV should equal
+            fee incurred; total fee is simply the sum over all assets; and for each asset its fee is calculated as
+            its fee rate times the price you rebalance at times the absolute change of shares
+            :param pd.Series sb: shares right before rebalancing
+            :param pd.Series wa: weight right after rebalancing
+            :param pd.Series pa: closing prices right after rebalancing, i.e. the prices you use to rebalance
+            :param pd.Series f: fee rate vector
+            :param float navb: NAV right before rebalancing
+            :return float: return the value of the root solving function, i.e. x is the solution when this function returns 0
+            """
+            return self.calculate_fee(sb=sb, sa=(wa/pa)*x, f=f, pa=pa) - navb + x
+
+        # --------------------------------------------------------------------------------------------------------------
+        # Step 3: backtest the portfolio, calculate detailed statistics
+        for idx, date in enumerate(data.index):
+
+            if idx == 0:    # for the start date...
+                actual_weight.loc[date] = input_weight.loc[date]    # actual weight equals input weight
+                nav.loc[date] = 1.0    # normalize NAV to 1
+                shares.loc[date] = actual_weight.loc[date] / data.loc[date]    # value over price equals amt, nav of 1 omitted
+                fee.loc[date] = self.calculate_fee(sb=pd.Series([0] * len(data.columns), index=data.columns),
+                                                   sa=shares.loc[date], f=fee_rate, pa=data.loc[date])
+                turnover_ratio.loc[date] = abs(input_weight.loc[date])
+
+            else:   # for the remaining dates...
+
+                if date not in input_weight.index:    # and if it's not a rebalancing date...
+                    shares.loc[date] = shares.loc[data.index[idx - 1]]    # number of shares unchanged, i.e. NOT rebalanced
+                    fee.loc[date] = 0   # obvsly no fee incurred, since no rebalancing
+                    turnover_ratio.loc[date] = 0    # obvsly turnover is 0, since no rebalancing
+                    nav.loc[date] = nav.loc[data.index[idx - 1]] + sum(shares.loc[date] * (data.loc[date] - data.loc[data.index[idx - 1]]))
+                    # NAV's increase comes from sum of price increment times shares held over assets
+                    actual_weight.loc[date] = shares.loc[date] * data.loc[date] / nav.loc[date]
+                    # actual weight by definition is value of each asset over NAV
+
+                else:   # and it is a rebalancing date...
+                    shares_before = shares.loc[data.index[idx - 1]]
+                    # shares right before rebalancing equals previous date
+                    nav_before = nav.loc[data.index[idx - 1]] + sum(shares_before * (data.loc[date] - data.loc[data.index[idx - 1]]))
+                    # NAV's increase comes from sum of price increment times shares held over assets
+                    nav_after = newton(nav_equation, x0=nav_before, args=(shares_before, input_weight.loc[date], data.loc[date], fee_rate, nav_before),
+                                       x1=nav_before*max(self.high_risk_fee_rate, self.low_risk_fee_rate))
+                    # Use the solver to find NAV after rebalancing s.t. weight after rebalancing is as wanted and fee is
+                    # subtracted from NAV
+                    fee.loc[date] = nav_before - nav_after
+                    nav.loc[date] = nav_after
+                    actual_weight.loc[date] = input_weight.loc[date]
+                    shares.loc[date] = actual_weight.loc[date] * nav_after / data.loc[date]
+                    turnover_ratio.loc[date] = abs(input_weight.loc[date] - actual_weight.loc[actual_weight.index[idx - 1]])
+
+        # --------------------------------------------------------------------------------------------------------------
+        # Step 4: organize the results
+        portfolio_stats['组合净值'] = nav
+        portfolio_stats['交易费用'] = fee
+        self.portfolio_results['回测结果汇总'] = None
+        self.portfolio_results['组合净值和交易费用'] = portfolio_stats
+        self.portfolio_results['归一化资产价格'] = data
+        self.portfolio_results['资产持有股数（对应归一化资产价格）'] = shares
+        self.portfolio_results['资产权重'] = actual_weight
+        self.portfolio_results['资产调仓目标'] = input_weight
+        self.portfolio_results['资产换手率'] = turnover_ratio
     
+    def backtest(self):
+        nav_backtest = Single_Asset(ann=self.ann, rf=self.rf,
+                                    data=pd.DataFrame(self.portfolio_results['组合净值和交易费用']['组合净值']))
+        nav_backtest.backtest('组合净值')
+        self.portfolio_results['回测结果汇总'] = nav_backtest.backtest_results['组合净值']
+
+        # --------------------------------------------------------------------------------------------------------------
+        # Calculate turnover ratio
+        years = list(set(self.portfolio_results['资产换手率'].index.year))
+        years.sort()
+        self.portfolio_results['回测结果汇总']['组合换手率'] = 0
+        for asset in self.portfolio_results['资产换手率'].columns:
+            self.portfolio_results['回测结果汇总'].loc['整体表现', asset + '换手率'] = sum(self.portfolio_results['资产换手率'][asset])
+            self.portfolio_results['回测结果汇总'].loc['整体表现', '组合换手率'] +=\
+                self.portfolio_results['回测结果汇总'].loc['整体表现', asset + '换手率']
+            for year in years:
+                self.portfolio_results['回测结果汇总'].loc[year, asset + '换手率'] =\
+                    sum(self.portfolio_results['资产换手率'].loc[self.portfolio_results['资产换手率'].index.year == year, asset])
+                self.portfolio_results['回测结果汇总'].loc[year, '组合换手率'] +=\
+                    self.portfolio_results['回测结果汇总'].loc[year, asset + '换手率']
+
+
+
+
+
+
+    """
     #输出策略分年度、整体表现，绘制净值图          
     def output(self, data, net, weight, df_year, df_all):
         networth = net
@@ -425,21 +371,30 @@ class Portfolio:
         
         # 绘制净值图
         self.output(data, net, asset_weight, df_year, df_all)
+    """
 
 
 if __name__ == "__main__":
     ann = 250
-    start = pd.datetime(2010, 7, 29)
-    end = pd.datetime(2021, 2, 3)
-    fee_rate = 0  # 0.0003
     rf = 0
-    input_path = r'../Data/'
-    file = r'data.xlsx'
-    output_path = r'../Output/'
-    asset_file = r'资产组合表现.xlsx'
-    single_file = r'单一资产表现.xlsx'
-    single = r'沪深300'
+    input_path = r'E:\College\Gap\Huatai\Backtesting-Toolkit\Data\data.xlsx'
+    output_path = r'E:\College\Gap\Huatai\Backtesting-Toolkit\Output\组合回测.xlsx'
+    high_risk_name_list = ['沪深300', '中证500', '创业板指', '南华商品指数']
+    high_risk_fee_rate = 0.0003
+    low_risk_name_list = ['中债-总财富(总值)指数', '中债-信用债总财富(总值)指数']
+    low_risk_fee_rate = 0.0002
 
-    pb = Portfolio(ann, start, end, fee_rate, rf, input_path, file,
-                   output_path, asset_file, single)
-    pb.portfolio_backtest()
+    pb = Portfolio(ann, rf)
+    pb.load_sheets_from_file(input_path=input_path, data_sheet_name='数据', weight_sheet_name='权重')
+    pb.load_fee_rates(high_risk_name_list=high_risk_name_list, high_risk_fee_rate=high_risk_fee_rate,
+                      low_risk_name_list=low_risk_name_list, low_risk_fee_rate=low_risk_fee_rate)
+    pb.slice()
+    pb.generate_nav()
+    pb.backtest()
+    writer = pd.ExcelWriter(path=output_path)
+    for key in pb.portfolio_results.keys():
+        temp = pb.portfolio_results[key]
+        if key != '回测结果汇总':
+            temp.index = temp.index.date
+        temp.to_excel(writer, sheet_name=key)
+    writer.save()
