@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 from Codes.Portfolio import Portfolio
 from Codes.Single_Asset import Single_Asset
-import pandas as pd
 
 
 if __name__ == "__main__":
