@@ -250,11 +250,37 @@ class Portfolio:
                 sum(self.backtest_results['资产换手率'][asset])
             self.backtest_results['回测结果汇总'].loc['整体表现', '组合换手率'] +=\
                 self.backtest_results['回测结果汇总'].loc['整体表现', asset + '换手率']
-            for year in years:
-                self.backtest_results['回测结果汇总'].loc[year, asset + '换手率'] =\
-                    sum(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year == year,
-                                                           asset])
-                self.backtest_results['回测结果汇总'].loc[year, '组合换手率'] +=\
+            for idx, year in enumerate(years):
+                if idx == 0:
+                    # if the first year only involves one data point, it merely serves as the opening price of the next
+                    # year's series, and is included in next year's turnover
+                    if len(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year == year,
+                                                           asset]) == 1:
+                        self.backtest_results['回测结果汇总'].loc[years[1], asset + '换手率'] = \
+                            sum(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year
+                                                                   == years[1], asset]) + \
+                            sum(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year
+                                                                   == years[0], asset])
+                        continue
+                        # the "continue" here is indispensable, otherwise lines 285-286 will trigger a KeyError
+                    else:
+                        self.backtest_results['回测结果汇总'].loc[year, asset + '换手率'] = \
+                            sum(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year
+                                                                   == year, asset])
+                elif idx == 1:
+                    # if the first year only involves one data point, the next year's turnover is already calculated
+                    # in the above code section
+                    if len(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year
+                                                              == years[0], asset]) > 1:
+                        self.backtest_results['回测结果汇总'].loc[year, asset + '换手率'] = \
+                            sum(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year
+                                                                   == year, asset])
+                else:
+                    self.backtest_results['回测结果汇总'].loc[year, asset + '换手率'] = \
+                        sum(self.backtest_results['资产换手率'].loc[self.backtest_results['资产换手率'].index.year
+                                                               == year, asset])
+
+                self.backtest_results['回测结果汇总'].loc[year, '组合换手率'] += \
                     self.backtest_results['回测结果汇总'].loc[year, asset + '换手率']
 
     def output(self, output_path: str):
