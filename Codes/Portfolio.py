@@ -99,6 +99,11 @@ class Portfolio:
         date_adjusted_weight = pd.DataFrame(columns=self.weight.columns)
 
         for date in self.weight.index:  # iterate all dates in the weight dataframe
+            
+            # Check whether the value of weight is valid.
+            for column_name in self.weight.columns:
+                if abs(self.weight.loc[date,column_name]) > 1:
+                    raise ValueError("Unexpected weight value: the absolute value of assect's weight is greater than 1.")
 
             if date in self.data.index:    # if date exists in the NAV dataframe, it can be safely kept
                 date_adjusted_weight.loc[date] = self.weight.loc[date]
@@ -209,10 +214,13 @@ class Portfolio:
                     # shares right before rebalancing equals previous date
                     nav_before = nav.loc[data.index[idx - 1]] + sum(shares_before * (data.loc[date] -
                                                                                      data.loc[data.index[idx - 1]]))
-                    # NAV's increase comes from sum of price increment times shares held over assets
-                    nav_after = newton(nav_equation, x0=nav_before, args=(shares_before, input_weight.loc[date],
+                    # If there's NAN in data or weight, RuntimeError would occur, add more explanation.
+                    try:
+                        nav_after = newton(nav_equation, x0=nav_before, args=(shares_before, input_weight.loc[date],
                                                                           data.loc[date], fee_rate, nav_before),
                                        x1=nav_before*max(self.high_risk_fee_rate, self.low_risk_fee_rate))
+                    except RuntimeError:
+                        raise ValueError("Cannot generate NAV series due to unexpected value from data or weight.")
                     # Use the solver to find NAV after rebalancing s.t. weight after rebalancing is as wanted and fee is
                     # subtracted from NAV
                     fee.loc[date] = nav_before - nav_after
